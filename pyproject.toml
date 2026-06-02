@@ -1,0 +1,26 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "agent-acceptance-trace"
+version = "0.1.0"
+description = "Trace coding-agent acceptance criteria to diff and closeout evidence."
+readme = "README.md"
+requires-python = ">=3.9"
+license = "MIT"
+authors = [{name = "Manuel Sampedro"}]
+dependencies = []
+keywords = ["ai-agents", "codex", "verification", "acceptance-criteria", "cli"]
+classifiers = [
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3 :: Only",
+  "Environment :: Console",
+  "Topic :: Software Development :: Quality Assurance",
+]
+
+[project.scripts]
+agent-acceptance-trace = "agent_acceptance_trace.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
