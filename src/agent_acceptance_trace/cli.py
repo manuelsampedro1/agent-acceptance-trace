@@ -85,6 +85,16 @@ class EvidenceLine:
     text: str
 
 
+@dataclass(frozen=True)
+class ProofPacketAudit:
+    path: str
+    status: str
+    verdict: str
+    changed_files: tuple[str, ...]
+    checks: tuple[str, ...]
+    issues: tuple[dict[str, str], ...]
+
+
 def normalize(text: str) -> str:
     decomposed = unicodedata.normalize("NFKD", text)
     ascii_text = "".join(ch for ch in decomposed if not unicodedata.combining(ch))
@@ -213,6 +223,247 @@ def changed_files(diff_text: str) -> list[str]:
     return files
 
 
+def normalize_proof_path(path: str) -> str:
+    normalized = path.strip()
+    while normalized.startswith("./"):
+        normalized = normalized[2:]
+    return normalized
+
+
+def proof_issue(severity: str, code: str, message: str, evidence: str, recommendation: str) -> dict[str, str]:
+    return {
+        "severity": severity,
+        "code": code,
+        "message": message,
+        "evidence": evidence,
+        "recommendation": recommendation,
+    }
+
+
+def audit_proof_packet(path: Path, diff_files: list[str]) -> ProofPacketAudit:
+    issues: list[dict[str, str]] = []
+    verdict = ""
+    packet_files: list[str] = []
+    checks: list[str] = []
+
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except OSError as error:
+        return ProofPacketAudit(
+            str(path),
+            "fail",
+            "",
+            (),
+            (),
+            (
+                proof_issue(
+                    "high",
+                    "proof_packet_unreadable",
+                    f"Proof packet could not be read: {error}",
+                    str(path),
+                    "Pass a readable agent-proof-packet.v1 JSON file.",
+                ),
+            ),
+        )
+    except json.JSONDecodeError as error:
+        return ProofPacketAudit(
+            str(path),
+            "fail",
+            "",
+            (),
+            (),
+            (
+                proof_issue(
+                    "high",
+                    "proof_packet_invalid_json",
+                    f"Proof packet is not valid JSON: {error}",
+                    str(path),
+                    "Regenerate the proof packet as valid JSON.",
+                ),
+            ),
+        )
+
+    if payload.get("schema_version") != "agent-proof-packet.v1":
+        issues.append(
+            proof_issue(
+                "high",
+                "proof_packet_wrong_schema",
+                "Proof packet schema_version is not agent-proof-packet.v1.",
+                str(path),
+                "Use an agent-proof-packet.v1 JSON proof packet.",
+            )
+        )
+
+    verdict = str(payload.get("verdict", "")).strip()
+    if verdict != "complete":
+        issues.append(
+            proof_issue(
+                "high",
+                "proof_packet_incomplete",
+                f"Proof packet verdict is {verdict or 'missing'}, not complete.",
+                str(path),
+                "Resolve missing evidence before using the packet as acceptance evidence.",
+            )
+        )
+
+    raw_changed_files = payload.get("changed_files")
+    if not isinstance(raw_changed_files, list) or not raw_changed_files:
+        issues.append(
+            proof_issue(
+                "high",
+                "proof_packet_missing_changed_files",
+                "Proof packet has no changed-file evidence.",
+                str(path),
+                "Regenerate the packet from the actual task diff.",
+            )
+        )
+    else:
+        for item in raw_changed_files:
+            if isinstance(item, dict) and isinstance(item.get("path"), str) and item["path"].strip():
+                packet_files.append(normalize_proof_path(item["path"]))
+            else:
+                issues.append(
+                    proof_issue(
+                        "high",
+                        "proof_packet_invalid_changed_file",
+                        "Proof packet contains an invalid changed_files entry.",
+                        str(path),
+                        "Keep changed_files entries shaped as objects with a path.",
+                    )
+                )
+
+    raw_checks = payload.get("checks")
+    check_statuses: list[str] = []
+    if not isinstance(raw_checks, list) or not raw_checks:
+        issues.append(
+            proof_issue(
+                "high",
+                "proof_packet_missing_checks",
+                "Proof packet has no checks.",
+                str(path),
+                "Include at least one passing check before using packet evidence.",
+            )
+        )
+    else:
+        for item in raw_checks:
+            if not isinstance(item, dict):
+                issues.append(
+                    proof_issue(
+                        "high",
+                        "proof_packet_invalid_check",
+                        "Proof packet contains an invalid check entry.",
+                        str(path),
+                        "Keep checks shaped as JSON objects.",
+                    )
+                )
+                continue
+            name = str(item.get("name", "")).strip()
+            status = str(item.get("status", "")).strip()
+            detail = str(item.get("detail", "")).strip()
+            if not name or not status:
+                issues.append(
+                    proof_issue(
+                        "high",
+                        "proof_packet_invalid_check",
+                        "Proof packet contains a nameless or statusless check.",
+                        str(path),
+                        "Keep checks shaped as objects with name and status.",
+                    )
+                )
+                continue
+            checks.append(f"{status}: {name}" + (f" - {detail}" if detail else ""))
+            check_statuses.append(status)
+
+    if check_statuses and any(status == "fail" for status in check_statuses):
+        issues.append(
+            proof_issue(
+                "high",
+                "proof_packet_failing_checks",
+                "Proof packet includes failing checks.",
+                str(path),
+                "Do not use failing packet checks as acceptance evidence.",
+            )
+        )
+    if not any(status == "pass" for status in check_statuses):
+        issues.append(
+            proof_issue(
+                "high",
+                "proof_packet_no_passing_checks",
+                "Proof packet has no passing checks.",
+                str(path),
+                "Add passing verification evidence before using the packet.",
+            )
+        )
+
+    missing_evidence = payload.get("missing_evidence")
+    if isinstance(missing_evidence, list) and missing_evidence:
+        issues.append(
+            proof_issue(
+                "high",
+                "proof_packet_missing_evidence",
+                "Proof packet still has missing evidence.",
+                ", ".join(str(item) for item in missing_evidence[:5]),
+                "Resolve missing evidence before tracing acceptance criteria.",
+            )
+        )
+
+    open_questions = payload.get("open_questions")
+    if isinstance(open_questions, list) and open_questions:
+        issues.append(
+            proof_issue(
+                "medium",
+                "proof_packet_open_questions",
+                "Proof packet still has open questions.",
+                ", ".join(str(item) for item in open_questions[:5]),
+                "Carry open questions into the trace review instead of treating the task as fully covered.",
+            )
+        )
+
+    diff_file_set = set(diff_files)
+    packet_file_set = set(packet_files)
+    if diff_file_set and packet_file_set and diff_file_set != packet_file_set:
+        issues.append(
+            proof_issue(
+                "high",
+                "proof_packet_diff_mismatch",
+                "Proof packet changed files do not match the provided diff.",
+                f"diff={sorted(diff_file_set)} packet={sorted(packet_file_set)}",
+                "Regenerate the packet from the exact task diff before tracing acceptance.",
+            )
+        )
+
+    status = "fail" if any(issue["severity"] == "high" for issue in issues) else "pass"
+    return ProofPacketAudit(str(path), status, verdict, tuple(packet_files), tuple(checks), tuple(issues))
+
+
+def proof_packet_evidence(packets: list[ProofPacketAudit]) -> list[EvidenceLine]:
+    evidence: list[EvidenceLine] = []
+    for packet in packets:
+        if packet.status != "pass" or packet.verdict != "complete":
+            continue
+        source = f"{packet.path}:proof-packet"
+        evidence.append(EvidenceLine(source, 0, f"Proof packet verdict {packet.verdict}."))
+        for file_path in packet.changed_files:
+            evidence.append(EvidenceLine(source, 0, f"Changed file {file_path}."))
+        for check in packet.checks:
+            evidence.append(EvidenceLine(source, 0, f"Check {check}."))
+    return evidence
+
+
+def proof_packets_to_json(packets: list[ProofPacketAudit]) -> list[dict[str, object]]:
+    return [
+        {
+            "path": packet.path,
+            "status": packet.status,
+            "verdict": packet.verdict,
+            "changed_files": list(packet.changed_files),
+            "checks": list(packet.checks),
+            "issues": list(packet.issues),
+        }
+        for packet in packets
+    ]
+
+
 def line_hits(tokens: tuple[str, ...], line: EvidenceLine) -> set[str]:
     normalized = normalize(line.text)
     return {token for token in tokens if token in normalized}
@@ -303,6 +554,19 @@ def render_markdown(report: dict, task_path: Path) -> str:
         lines.extend(f"- `{path}`" for path in summary["changed_files"])
         lines.append("")
 
+    if report.get("proof_packets"):
+        lines.extend(["## Proof Packets", ""])
+        for packet in report["proof_packets"]:
+            lines.append(
+                f"- `{packet['status']}` `{packet['path']}`: verdict `{packet['verdict'] or 'missing'}`, "
+                f"{len(packet['changed_files'])} files, {len(packet['checks'])} checks"
+            )
+            for issue in packet["issues"]:
+                lines.append(f"  - `{issue['severity']}` `{issue['code']}`: {issue['message']}")
+                lines.append(f"    Evidence: {issue['evidence']}")
+                lines.append(f"    Next: {issue['recommendation']}")
+        lines.append("")
+
     lines.extend(["## Criteria", ""])
     for row in report["criteria"]:
         lines.append(f"### {row['index']}. {row['status'].upper()}")
@@ -339,6 +603,13 @@ def build_parser() -> argparse.ArgumentParser:
         default=[],
         help="Evidence file such as a closeout, proof packet, command receipt, or CI summary. Can be repeated.",
     )
+    parser.add_argument(
+        "--proof-packet",
+        type=Path,
+        action="append",
+        default=[],
+        help="agent-proof-packet.v1 JSON file to verify against the diff and use as structured evidence. Can be repeated.",
+    )
     parser.add_argument("--format", choices=("markdown", "json"), default="markdown", help="Output format.")
     parser.add_argument("--min-covered", type=float, default=0.0, help="Minimum weighted coverage score required.")
     parser.add_argument("--strict", action="store_true", help="Fail if any criterion is partial or missing.")
@@ -354,9 +625,13 @@ def main(argv: list[str] | None = None) -> int:
         if not criteria:
             parser.error(f"no acceptance criteria found in {args.task}")
         diff_text = read_diff(args.diff, args.repo, args.base)
+        files = changed_files(diff_text)
+        proof_packets = [audit_proof_packet(path, files) for path in args.proof_packet]
         evidence = read_evidence_files(args.evidence)
         evidence.extend(diff_evidence(diff_text, str(args.diff) if args.diff else "git diff"))
-        report = trace(criteria, evidence, changed_files(diff_text))
+        evidence.extend(proof_packet_evidence(proof_packets))
+        report = trace(criteria, evidence, files)
+        report["proof_packets"] = proof_packets_to_json(proof_packets)
     except (FileNotFoundError, ValueError) as error:
         print(error, file=sys.stderr)
         return 2
@@ -368,7 +643,12 @@ def main(argv: list[str] | None = None) -> int:
 
     fails_threshold = report["score"] < args.min_covered
     fails_strict = args.strict and (report["summary"]["partial"] or report["summary"]["missing"])
-    return 1 if fails_threshold or fails_strict else 0
+    fails_proof_packet = any(
+        issue["severity"] == "high"
+        for packet in report.get("proof_packets", [])
+        for issue in packet["issues"]
+    )
+    return 1 if fails_threshold or fails_strict or fails_proof_packet else 0
 
 
 if __name__ == "__main__":

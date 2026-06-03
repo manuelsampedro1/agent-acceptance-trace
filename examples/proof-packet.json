@@ -1,0 +1,45 @@
+{
+  "schema_version": "agent-proof-packet.v1",
+  "title": "Acceptance trace proof",
+  "verdict": "complete",
+  "changed_files": [
+    {
+      "path": "README.md",
+      "status": "modified",
+      "additions": 6,
+      "deletions": 0
+    },
+    {
+      "path": "todo_cli.py",
+      "status": "added",
+      "additions": 8,
+      "deletions": 0
+    },
+    {
+      "path": "tests/test_todo_cli.py",
+      "status": "added",
+      "additions": 3,
+      "deletions": 0
+    }
+  ],
+  "checks": [
+    {
+      "name": "unit tests",
+      "status": "pass",
+      "detail": "make test"
+    },
+    {
+      "name": "smoke command",
+      "status": "pass",
+      "detail": "make smoke"
+    }
+  ],
+  "risks": [
+    "Local JSON store has no locking."
+  ],
+  "decisions": [],
+  "evidence_files": [],
+  "command_receipts": [],
+  "open_questions": [],
+  "missing_evidence": []
+}
